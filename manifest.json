@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "PhishGuard Pro",
+  "version": "2.0",
+  "description": "Next-generation phishing protection with real-time URL scanning and AI-powered intent analysis.",
+  "icons": {
+    "16": "icons/logo-demo.png",
+    "48": "icons/logo-demo.png",
+    "128": "icons/logo-demo.png"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/logo-demo.png",
+      "32": "icons/logo-demo.png",
+      "48": "icons/logo-demo.png"
+    }
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "background": {
+    "service_worker": "background/background.js"
+  },
+  "permissions": [
+    "storage",
+    "alarms",
+    "tabs",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://safebrowsing.googleapis.com/",
+    "https://www.virustotal.com/",
+    "https://api.whoxy.com/",
+    "https://api.openai.com/"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; style-src 'self' https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com;"
+  }
+}

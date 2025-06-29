@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PhishGuard Pro - Phishing Protection</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" integrity="sha512-iecdLmaskl7CVkqkXNQ/ZH/XLlvWZOJyj7Yy7tcenmpD1ypASozpmT/E0iPtmFIB46ZmdtAc9eNBvH0H/ZpiBw==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div id="error-display" aria-live="assertive" style="display: none;"></div>
+
+  <div class="header-container">
+    <div class="top-bar">
+      <div class="theme-toggle">
+        <i class="fas fa-sun"></i>
+        <label class="switch">
+          <input type="checkbox" id="theme-switch" aria-label="Toggle dark mode">
+          <span class="slider round"></span>
+        </label>
+        <i class="fas fa-moon"></i>
+      </div>
+      <button id="settings-btn" class="icon-btn" aria-label="Settings" title="Settings">
+        <i class="fas fa-cog"></i>
+      </button>
+    </div>
+
+    <header>
+      <div class="icon">
+        <img src="../icons/logo-demo.png" alt="PhishGuard Logo">
+      </div>
+      <div class="header-text">
+        <h1>PhishGuard Pro</h1>
+        <p class="subtitle">AI-Powered Phishing Protection</p>
+      </div>
+    </header>
+  </div>
+
+  <div class="url-input-container">
+    <label for="url-input" class="visually-hidden">URL to check</label>
+    <input type="url" id="url-input" placeholder="Enter URL to analyze..." autocomplete="off">
+    <button id="check-btn" class="action-btn">
+      <i class="fas fa-shield-alt"></i> Analyze
+    </button>
+  </div>
+
+  <div class="quick-actions">
+    <button id="current-tab-btn" class="action-btn">
+      <i class="fas fa-globe"></i> Current Tab
+    </button>
+    <button id="history-btn" class="action-btn">
+      <i class="fas fa-history"></i> History
+    </button>
+  </div>
+
+  <div class="loading-container" id="loading" aria-live="polite" style="display: none;">
+    <div class="loading-spinner" aria-hidden="true"></div>
+    <p id="loading-message">Analyzing website...</p>
+    <div class="progress-bar" aria-hidden="true">
+      <div class="progress-fill" id="progress-fill"></div>
+    </div>
+  </div>
+
+  <main id="main-content" style="display: none;">
+    <div class="card summary-card" id="summary-card">
+      <div class="progress large" id="overall-score-progress" style="--progress: 0; --color: var(--neutral-color);">
+        <h3 id="overall-score-text">?<span>%</span></h3>
+      </div>
+      <h2 id="summary-title" class="summary-title">Website Safety</h2>
+      <p id="summary-text">Enter a URL or use 'Current Tab' to start.</p>
+      <div class="risk-indicator" id="risk-indicator">
+        <div class="indicator-bar" style="--position: 0;"></div>
+        <div class="indicator-labels">
+          <span>Safe</span>
+          <span>Caution</span>
+          <span>Danger</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card metrics-card">
+      <div class="card-header">
+        <h3>Security Metrics</h3>
+      </div>
+      <div class="metrics-grid">
+        <div class="metric" id="https-metric">
+          <div class="progress" id="https-progress" style="--progress: 50; --color: var(--neutral-color);"><h3 id="https-score">?</h3></div>
+          <h4 id="https-text" title="HTTPS Status">HTTPS</h4>
+        </div>
+        <div class="metric" id="domain-age-metric">
+           <div class="progress" id="domain-age-progress" style="--progress: 0; --color: var(--neutral-color);">
+             <h3 id="domain-age-text-display">-</h3>
+           </div>
+           <h4 id="domain-age-text-label" title="Domain Registration Age">Age</h4>
+        </div>
+        <div class="metric" id="structure-metric">
+          <div class="progress" id="structure-progress" style="--progress: 50; --color: var(--neutral-color);"><h3 id="structure-score">?<span>%</span></h3></div>
+          <h4 id="structure-text" title="URL Structure Analysis">Structure</h4>
+        </div>
+        <div class="metric" id="reputation-metric">
+          <div class="progress" id="reputation-progress" style="--progress: 50; --color: var(--neutral-color);"><h3 id="reputation-score">?<span>%</span></h3></div>
+          <h4 id="reputation-text" title="Website Reputation (Google, VirusTotal)">Reputation</h4>
+        </div>
+      </div>
+    </div>
+
+    <div class="card details-card">
+      <div class="card-header">
+        <h3>Detailed Analysis</h3>
+        <button id="toggle-details" class="toggle-btn" aria-expanded="true" aria-controls="details-content" title="Toggle Details">
+          <i class="fas fa-chevron-down"></i>
+        </button>
+      </div>
+      <div class="details-content collapsible" id="details-content" aria-hidden="false">
+        <p>Scan results details will appear here.</p>
+      </div>
+    </div>
+
+    <div class="card report-card">
+      <div class="card-header">
+        <h3>Full Report</h3>
+        <button id="toggle-report" class="toggle-btn" aria-expanded="false" aria-controls="report-content" title="Toggle Report">
+          <i class="fas fa-chevron-down"></i>
+        </button>
+      </div>
+      <div class="report-content collapsible" id="report-content" aria-hidden="true">
+        <p>A detailed report will appear here after analysis.</p>
+      </div>
+    </div>
+
+    <div class="card intent-card">
+      <div class="card-header">
+        <h3><i class="fas fa-robot"></i> AI Website Intent</h3>
+        <button id="toggle-intent" class="toggle-btn" aria-expanded="false" aria-controls="intent-content" title="Toggle AI Intent Analysis">
+            <i class="fas fa-chevron-down"></i>
+        </button>
+      </div>
+      <div class="intent-content collapsible" id="intent-content" aria-hidden="true">
+        <p>AI-powered analysis of the website's purpose will appear here. Requires an OpenAI API key in settings.</p>
+      </div>
+    </div>
+  </main>
+
+  <div class="scan-info">
+    <span>Last scan: <span id="last-scan">Never</span></span>
+    <span>Scan time: <span id="scan-time">0s</span></span>
+  </div>
+
+  <script src="whois.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

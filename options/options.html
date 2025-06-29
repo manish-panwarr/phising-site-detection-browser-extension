@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PhishGuard Settings</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="icon">
+        <img src="../icons/logo-demo.png" alt="PhishGuard Logo">
+      </div>
+      <div class="header-text">
+        <h1>PhishGuard Settings</h1>
+        <p class="subtitle">Configure API keys for enhanced protection</p>
+      </div>
+    </header>
+
+    <form id="settings-form">
+      <div class="form-group">
+        <label for="google-api-key">
+          <i class="fab fa-google"></i> Google Safe Browsing API Key
+        </label>
+        <input type="password" id="google-api-key" placeholder="Enter your API key">
+        <p class="help-text">
+          Required for Google's threat database.
+          <a href="https://console.cloud.google.com/apis/library/safebrowsing.googleapis.com" target="_blank">Get key</a>
+        </p>
+      </div>
+
+      <div class="form-group">
+        <label for="virustotal-api-key">
+          <i class="fas fa-shield-virus"></i> VirusTotal API Key
+        </label>
+        <input type="password" id="virustotal-api-key" placeholder="Enter your API key">
+        <p class="help-text">
+          For multi-engine scanning.
+          <a href="https://www.virustotal.com/gui/my-apikey" target="_blank">Get key</a>
+        </p>
+      </div>
+
+      <div class="form-group">
+        <label for="whoxy-api-key">
+          <i class="fas fa-id-card"></i> Whoxy API Key
+        </label>
+        <input type="password" id="whoxy-api-key" placeholder="Enter your API key">
+        <p class="help-text">
+          For domain registration checks.
+          <a href="https://www.whoxy.com/" target="_blank">Get key</a>
+        </p>
+      </div>
+
+      <div class="form-group">
+        <label for="chatgpt-api-key">
+          <i class="fas fa-robot"></i>OpenRouter.API Key
+        </label>
+        <input type="password" id="chatgpt-api-key" placeholder="Enter your API key">
+        <p class="help-text">
+          For AI-powered website intent analysis.
+          <a href="https://openrouter.ai/settings/keys" target="_blank">Get key</a>
+        </p>
+      </div>
+
+      <div class="form-actions">
+        <button type="submit" id="save-btn" class="action-btn">
+          <i class="fas fa-save"></i> Save Settings
+        </button>
+        <button type="button" id="reset-btn" class="action-btn danger">
+          <i class="fas fa-trash"></i> Clear All
+        </button>
+      </div>
+    </form>
+
+    <div id="status-message" class="status-message"></div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
