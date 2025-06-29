@@ -5,7 +5,9 @@ Here's your well-formatted `README.md` with improved grammar, structured clarity
 
 ---
 
-# PhishGuard - Advanced Phishing & Malware Detection Extension
+#PhishGuard![Screenshot 2025-04-09 205302](https://github.com/user-attachments/assets/777fcb86-2700-409a-81bb-bc5b4da25684)
+
+ - Advanced Phishing & Malware Detection Extension
 
 PhishGuard is a powerful browser extension that provides multi-layered defense against phishing, malware, and other malicious websites. It goes beyond basic blocklists by performing real-time, in-depth analysis of any URL to generate a comprehensive risk score and a human-readable summary.
 
@@ -173,13 +175,6 @@ All contributions are welcome. Submit issues, feature suggestions, or pull reque
 ## License
 
 This project is licensed under the MIT License.
-
----
-
-Let me know if you want the markdown version too or a live badge/readme template for GitHub.
-
----
-
 MIT License
 
 Copyright (c) \[2025] \[Manish Mohan Singh]
@@ -202,27 +197,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-
-Project File Structure
-Generated code
-phishguard/
-│
-├── popup.html          # The HTML structure for the extension popup.
-├── popup.css           # All styles for the popup UI, including themes and animations.
-├── popup.js            # The core logic: event handling, API calls, UI updates, risk scoring.
-├── whois.js            # (Assumed) A helper script for handling the Whoxy API call and its UI component.
-├── manifest.json       # The extension's manifest file, defining permissions and structure.
-├── icons/              # Directory for the extension icons (16x16, 48x48, 128x128).
-└── README.md           # This file.
-IGNORE_WHEN_COPYING_START
-content_copy
-download
-Use code with caution.
-IGNORE_WHEN_COPYING_END
-Contributing
-
+---
 Contributions are welcome! If you have suggestions for new features, improvements, or bug fixes, please feel free to open an issue or submit a pull request.
 
-License
 
-This project is licensed under the MIT License.
