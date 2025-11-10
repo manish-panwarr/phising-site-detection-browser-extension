@@ -16,7 +16,7 @@ const elements = {
   status: document.getElementById('status-message')
 };
 
-// --- State ---
+
 let statusTimeout = null;
 
 /**
@@ -35,9 +35,7 @@ async function init() {
   await loadTheme();
 }
 
-/**
- * Sets up event listeners for form submission and button clicks.
- */
+
 function setupEventListeners() {
   elements.form.addEventListener('submit', handleSave);
   elements.resetBtn.addEventListener('click', handleReset);
@@ -164,4 +162,5 @@ async function loadTheme() {
 }
 
 // --- Initializer ---
+
 document.addEventListener('DOMContentLoaded', init);
