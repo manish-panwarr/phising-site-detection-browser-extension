@@ -1,8 +1,6 @@
 # phising-site-detection-browser-extension
 A browser extension that can detect whether a website is a phishing or malicious site.
 
-Here's your well-formatted `README.md` with improved grammar, structured clarity, and **no asterisks or markdown decorations**, so it reads cleanly even as plain text:
-
 ---
 
 #PhishGuard![Screenshot 2025-04-09 205302](https://github.com/user-attachments/assets/777fcb86-2700-409a-81bb-bc5b4da25684)
