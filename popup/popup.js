@@ -1,22 +1,7 @@
-/**
- * popup.js - Main logic for the PhishGuard extension popup.
- * This script orchestrates the entire analysis process, including:
- * - Handling user interactions (button clicks, input).
- * - Fetching data from various APIs (Google, VirusTotal, Whoxy, OpenAI/OpenRouter).
- * - Calculating a comprehensive risk score.
- * - Dynamically updating the UI with results and animations.
- * - Managing local cache and history.
- *
- * NOTE: This script has a dependency on another script that must define the `window.phishGuardWhois` object.
- * This object is expected to have the methods `fetchAndDisplayDomainAge`, `updateDomainAgeMetricUI`, and `resetUI`.
- */
 
 // --- Global Helper ---
 /**
  * Updates the visual properties of a CSS conic-gradient progress circle.
- * @param {HTMLElement} element - The progress circle container element.
- * @param {number} percent - The percentage (0-100) to fill the circle.
- * @param {string} [color] - Optional CSS color value for the progress arc.
  */
 window.updateProgressCircle = (element, percent, color) => {
     if (!element) return;
@@ -27,40 +12,47 @@ window.updateProgressCircle = (element, percent, color) => {
 
 // --- Configuration & State ---
 const CONFIG = {
-    CACHE_DURATION: 5 * 60 * 1000, // 5 minutes for runtime cache
-    SCAN_STEPS: 8, // Total steps for the progress bar
+    CACHE_DURATION: 5 * 60 * 1000,
+    SCAN_STEPS: 8,
     MAX_HISTORY_ITEMS: 20,
     ERROR_DISPLAY_DURATION: 7000,
+    PHISHING_THRESHOLD: 72, // score above this shows the full-width warning
 };
 
 const state = {
     currentUrl: '',
     currentTabTitle: '',
     scanResults: null,
-    apiStatus: 'ready', // 'ready', 'loading', 'error'
+    apiStatus: 'ready',
     history: [],
     errorTimeoutId: null,
+    riskChart: null,
 };
 
 // --- DOM Element Cache ---
 const elements = {};
 function cacheElements() {
     const ids = [
-        'body', 'url-input', 'check-btn', 'current-tab-btn', 'history-btn', 'settings-btn',
+        'url-input', 'check-btn', 'current-tab-btn', 'history-btn', 'settings-btn',
         'loading', 'loading-message', 'progress-fill', 'main-content',
-        'overall-score-progress', 'overall-score-text', 'summary-title', 'summary-text',
-        'risk-indicator', 'https-progress', 'https-score', 'https-text',
-        'structure-progress', 'structure-score', 'structure-text',
-        'reputation-progress', 'reputation-score', 'reputation-text',
+        'overall-score-progress', 'overall-score-text',
+        'risk-indicator', 'risk-pill', 'status-badge', 'status-badge-text',
         'details-content', 'report-content', 'intent-content',
         'toggle-details', 'toggle-report', 'toggle-intent',
-        'last-scan', 'scan-time', 'theme-switch', 'error-display'
+        'toggle-chart', 'toggle-alerts',
+        'last-scan', 'scan-time', 'theme-switch', 'error-display',
+        'alerts-card', 'alerts-content', 'actions-bar',
+        'report-btn', 'recheck-btn', 'trust-btn',
+        'phishing-warning-overlay', 'overlay-domain-text', 'overlay-risk-score',
+        'overlay-back-btn', 'overlay-proceed-btn',
+        'risk-chart', 'donut-score',
+        'leg-domain', 'leg-content', 'leg-blacklist',
+        'stat-domain-age-val', 'stat-https-val', 'stat-blacklist-val', 'stat-vt-val',
     ];
     ids.forEach(id => {
-        const camelCaseId = id.replace(/-(\w)/g, (_, c) => c.toUpperCase());
-        elements[camelCaseId] = document.getElementById(id);
+        const key = id.replace(/-([\w])/g, (_, c) => c.toUpperCase());
+        elements[key] = document.getElementById(id);
     });
-    // Add elements that don't follow the standard ID pattern
     if (elements.riskIndicator) {
         elements.riskIndicatorBar = elements.riskIndicator.querySelector('.indicator-bar');
     }
@@ -81,16 +73,31 @@ function setupEventListeners() {
     elements.historyBtn?.addEventListener('click', showHistoryModal);
     elements.settingsBtn?.addEventListener('click', openOptionsPage);
     elements.urlInput?.addEventListener('keypress', e => { if (e.key === 'Enter') handleCheckUrl(); });
+
     elements.toggleDetails?.addEventListener('click', () => toggleSection(elements.detailsContent, elements.toggleDetails));
     elements.toggleReport?.addEventListener('click', () => toggleSection(elements.reportContent, elements.toggleReport));
     elements.toggleIntent?.addEventListener('click', () => toggleSection(elements.intentContent, elements.toggleIntent));
+    elements.toggleChart?.addEventListener('click', () => {
+        const c = document.getElementById('chart-content');
+        toggleSection(c, elements.toggleChart);
+    });
+    elements.toggleAlerts?.addEventListener('click', () => toggleSection(elements.alertsContent, elements.toggleAlerts));
     elements.themeSwitch?.addEventListener('change', toggleTheme);
+
+    // Actions
+    elements.reportBtn?.addEventListener('click', handleReportSite);
+    elements.recheckBtn?.addEventListener('click', handleRecheck);
+    elements.trustBtn?.addEventListener('click', handleTrustSite);
+
+    // Overlay actions
+    elements.overlayBackBtn?.addEventListener('click', () => {
+        hidePhishingOverlay();
+        chrome.tabs.goBack?.();
+    });
+    elements.overlayProceedBtn?.addEventListener('click', hidePhishingOverlay);
 }
 
-
 // --- Event Handlers ---
-
-/** Initiates a scan based on the URL in the input field. */
 async function handleCheckUrl() {
     const url = elements.urlInput?.value?.trim();
     if (!url) return showError('Please enter a URL.');
@@ -102,7 +109,6 @@ async function handleCheckUrl() {
     await scanWebsite(state.currentUrl);
 }
 
-/** Initiates a scan using the URL of the currently active browser tab. */
 async function handleCurrentTab() {
     try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -111,7 +117,6 @@ async function handleCurrentTab() {
         }
         const validation = isValidUrl(tab.url);
         if (!validation.valid) return showError(validation.message);
-
         elements.urlInput.value = validation.url;
         state.currentUrl = validation.url;
         state.currentTabTitle = tab.title || 'No Title';
@@ -122,32 +127,54 @@ async function handleCurrentTab() {
     }
 }
 
-/** Opens the extension's options page. */
 function openOptionsPage() {
     chrome.runtime.openOptionsPage?.();
 }
 
+function handleReportSite() {
+    if (!state.currentUrl) return showError('No site to report.');
+    const reportUrl = `https://safebrowsing.google.com/safebrowsing/report_phish/?url=${encodeURIComponent(state.currentUrl)}`;
+    chrome.tabs.create({ url: reportUrl });
+}
+
+async function handleRecheck() {
+    if (!state.currentUrl) return showError('No site to recheck.');
+    // Clear cache for this URL
+    const { scanCache = {} } = await chrome.storage.local.get('scanCache');
+    delete scanCache[state.currentUrl];
+    await chrome.storage.local.set({ scanCache });
+    await scanWebsite(state.currentUrl);
+}
+
+function handleTrustSite() {
+    if (!state.currentUrl) return;
+    chrome.storage.local.get({ trustedSites: [] }, ({ trustedSites }) => {
+        if (!trustedSites.includes(state.currentUrl)) {
+            trustedSites.push(state.currentUrl);
+            chrome.storage.local.set({ trustedSites });
+        }
+    });
+    hidePhishingOverlay();
+    updateStatusBadge('safe');
+    showError('Site marked as trusted. ✓');
+}
 
 // --- Core Scan Logic ---
-
-/**
- * The main function that orchestrates the entire website analysis process.
- * @param {string} url - The URL to be scanned.
- */
 async function scanWebsite(url) {
     if (state.apiStatus === 'loading') return;
     const scanStartTime = Date.now();
     state.apiStatus = 'loading';
-    showLoading(true, 'Initiating analysis...');
+    showLoading(true, 'Initiating analysis…');
     clearError();
+    hidePhishingOverlay();
     resetUIForScan();
 
     try {
-        updateProgress(1, 'Validating URL...');
+        updateProgress(1, 'Validating URL…');
         const domain = extractDomainFromUrl(url);
         if (!domain) throw new Error("Could not extract a valid domain.");
 
-        updateProgress(2, 'Checking cache...');
+        updateProgress(2, 'Checking cache…');
         const cached = await getFromCache(url);
         if (cached) {
             console.log("PhishGuard: Using cached results for:", url);
@@ -159,32 +186,30 @@ async function scanWebsite(url) {
             return;
         }
 
-        updateProgress(3, 'Fetching API keys...');
+        updateProgress(3, 'Fetching API keys…');
         const apiKeys = await chrome.storage.local.get(['googleApiKey', 'virustotalApiKey', 'whoxyApiKey', 'chatGptApiKey']);
 
-        updateProgress(4, 'Checking Google Safe Browsing...');
+        updateProgress(4, 'Checking Google Safe Browsing…');
         const safeBrowsingPromise = apiKeys.googleApiKey ? checkGoogleSafeBrowsing(url, apiKeys.googleApiKey) : Promise.resolve({ error: 'API key missing' });
 
-        updateProgress(5, 'Querying VirusTotal...');
+        updateProgress(5, 'Querying VirusTotal…');
         const virustotalPromise = apiKeys.virustotalApiKey ? checkVirusTotal(url, apiKeys.virustotalApiKey) : Promise.resolve({ error: 'API key missing' });
 
-        updateProgress(6, 'Analyzing URL & SSL...');
+        updateProgress(6, 'Analyzing URL & SSL…');
         const sslPromise = checkSslCertificate(url);
         const urlAnalysisResult = analyzeUrlStructure(url);
 
         const [safeBrowsingResult, virustotalResult, sslResult] = await Promise.all([safeBrowsingPromise, virustotalPromise, sslPromise]);
 
-        updateProgress(7, 'Fetching domain info (WHOIS)...');
+        updateProgress(7, 'Fetching domain info (WHOIS)…');
         let whoisResult = { error: 'WHOIS module not loaded' };
         if (window.phishGuardWhois) {
             whoisResult = await window.phishGuardWhois.fetchAndDisplayDomainAge(domain, apiKeys.whoxyApiKey);
-        } else {
-             console.error("PhishGuard: window.phishGuardWhois is not defined. WHOIS check skipped.");
         }
 
         let preliminaryResults = { url, safeBrowsing: safeBrowsingResult, virustotal: virustotalResult, whoisResult, sslResult, urlAnalysis: urlAnalysisResult };
 
-        updateProgress(8, 'Analyzing intent with AI...');
+        updateProgress(8, 'AI phishing analysis…');
         const intentPrompt = generateAIPrompt(preliminaryResults);
         const intentAnalysisResult = apiKeys.chatGptApiKey
             ? await analyzeWithAI(intentPrompt, apiKeys.chatGptApiKey)
@@ -212,9 +237,7 @@ async function scanWebsite(url) {
     }
 }
 
-
 // --- API & Analysis Functions ---
-
 async function checkGoogleSafeBrowsing(url, apiKey) {
     const apiUrl = `https://safebrowsing.googleapis.com/v4/threatMatches:find?key=${apiKey}`;
     const payload = {
@@ -243,6 +266,9 @@ async function checkVirusTotal(url, apiKey) {
     };
 }
 
+/**
+ * Generates the structured AI prompt for phishing detection.
+ */
 function generateAIPrompt(results) {
     const { url, safeBrowsing, virustotal, whoisResult, sslResult, urlAnalysis } = results;
 
@@ -255,42 +281,59 @@ function generateAIPrompt(results) {
         whoisRegistered: sanitize(get(whoisResult?.formatted_create_date)),
         whoisAge: sanitize(get(whoisResult?.domainAgeString)),
         vtDetections: `${get(virustotal?.maliciousCount, 0)} malicious, ${get(virustotal?.suspiciousCount, 0)} suspicious`,
-        gsbStatus: safeBrowsing?.isSafe ? 'Safe' : `Threats found: ${get(safeBrowsing.threats?.join(', '), 'Unknown')}`,
+        gsbStatus: safeBrowsing?.isSafe ? 'Safe' : `Threats found: ${get(safeBrowsing?.threats?.join(', '), 'Unknown')}`,
         urlKeywords: urlAnalysis?.hasSuspiciousKeywords ? 'Yes' : 'No',
         urlSuspiciousTld: urlAnalysis?.isSuspiciousTld ? 'Yes' : 'No',
         similarToBrand: get(urlAnalysis?.similarToBrand, 'Unknown'),
         fullUrl: get(url)
     };
 
-    return `
-Analyze the phishing risk of the following website strictly based on metadata only. Do not access or assume the actual content.
+    return `You are a cybersecurity assistant specialized in phishing detection.
 
-Focus especially on spelling similarity with top global companies (e.g. Amazon, Google, Microsoft, SBI, PayPal, etc.), domain manipulation, and impersonation signs. Be very strict in evaluating spelling variations.
+Strict Rules:
+- Use ONLY the provided metadata.
+- Do NOT assume or imagine website content.
+- Output must be SHORT, precise, and structured.
+- No explanations longer than 1 line.
+- No paragraphs. Only bullet points.
+- Avoid generic text.
+
+Main Task:
+Evaluate phishing risk with HIGH sensitivity to:
+- Brand impersonation (Amazon, Google, SBI, PayPal, Microsoft, etc.)
+- Typosquatting (misspellings like amaz0n, g00gle, paypa1)
+- Suspicious domains and TLDs
+- Newly registered domains
 
 Website URL: ${promptData.fullUrl}
+
 --- METADATA ---
-- Google Safe Browsing: ${promptData.gsbStatus}
-- VirusTotal Detections: ${promptData.vtDetections}
-- Domain Age: ${promptData.whoisAge} (Registered on: ${promptData.whoisRegistered})
-- Secure Connection (SSL): ${promptData.sslValid}
-- Suspicious Keywords in URL: ${promptData.urlKeywords}
-- Suspicious TLD (like .xyz, .top): ${promptData.urlSuspiciousTld}
-- Similar to known brand: ${promptData.similarToBrand}
---- END METADATA ---
+- Safe Browsing: ${promptData.gsbStatus}
+- VirusTotal: ${promptData.vtDetections}
+- Domain Age: ${promptData.whoisAge}
+- SSL: ${promptData.sslValid}
+- Keywords: ${promptData.urlKeywords}
+- Suspicious TLD: ${promptData.urlSuspiciousTld}
+- Brand Similarity: ${promptData.similarToBrand}
+--- END ---
 
-Give a clear, short, structured risk summary under these headings:
+Output Format (STRICT):
+
 Impersonation Risk:
-- Describe if it resembles a known brand very closely, moderately, or not at all.
+- High / Medium / Low (one line reason)
 
-Key Red Flags:
-- List 2 or 3 specific metadata issues that suggest risk.
+Top Signals:
+- Max 3 bullets (very short, data-driven)
 
-Overall Verdict:
-- Give one clear sentence that summarizes phishing risk.
-`.trim();
+Risk Score:
+- Number (0–100)
+
+Verdict:
+- SAFE / SUSPICIOUS / PHISHING (one line only)
+
+Confidence:
+- High / Medium / Low`.trim();
 }
-
-
 
 async function analyzeWithAI(prompt, apiKey) {
     const apiUrl = 'https://openrouter.ai/api/v1/chat/completions';
@@ -306,8 +349,8 @@ async function analyzeWithAI(prompt, apiKey) {
             body: JSON.stringify({
                 model: "mistralai/mistral-7b-instruct",
                 messages: [{ role: "user", content: prompt }],
-                temperature: 0.3,
-                max_tokens: 250
+                temperature: 0.2,
+                max_tokens: 320
             })
         });
         const data = await response.json();
@@ -323,12 +366,11 @@ async function analyzeWithAI(prompt, apiKey) {
     }
 }
 
-
 function checkSslCertificate(url) {
     try {
         const urlObj = new URL(url);
         if (urlObj.protocol === 'https:') return { isValid: true, detail: 'Uses secure HTTPS' };
-        if (urlObj.protocol === 'http:') return { isValid: false, error: 'Site uses insecure HTTP' };
+        if (urlObj.protocol === 'http:')  return { isValid: false, error: 'Site uses insecure HTTP' };
         return { isValid: null, error: `Unsupported protocol: ${urlObj.protocol}` };
     } catch {
         return { isValid: false, error: 'Invalid URL for SSL check' };
@@ -338,13 +380,24 @@ function checkSslCertificate(url) {
 function analyzeUrlStructure(url) {
     try {
         const urlObj = new URL(url);
-        const suspiciousTlds = ['.xyz', '.top', '.info', '.loan', '.buzz', '.tk', '.biz', '.win', '.link'];
-        const suspiciousKeywords = ['login', 'signin', 'verify', 'account', 'update', 'secure', 'confirm', 'support', 'password', 'bank'];
+        const suspiciousTlds = ['.xyz', '.top', '.info', '.loan', '.buzz', '.tk', '.biz', '.win', '.link', '.gq', '.ml', '.cf'];
+        const suspiciousKeywords = ['login', 'signin', 'verify', 'account', 'update', 'secure', 'confirm', 'support', 'password', 'bank', 'paypal', 'microsoft', 'amazon', 'google', 'apple'];
+        const brands = ['google', 'facebook', 'amazon', 'microsoft', 'apple', 'paypal', 'netflix', 'sbi', 'instagram', 'twitter'];
+        const hostname = urlObj.hostname.replace(/^www\./, '');
+        const similarToBrand = brands.find(b => {
+            if (hostname.includes(b) && hostname !== b && !hostname.endsWith(`.${b}.com`)) return true;
+            // Levenshtein-lite: common typosquatting chars
+            const cleaned = hostname.replace(/0/g,'o').replace(/1/g,'l').replace(/3/g,'e').replace(/4/g,'a');
+            if (cleaned.includes(b) && cleaned !== hostname) return true;
+            return false;
+        }) || null;
+
         return {
             isIpAddress: /^(\d{1,3}\.){3}\d{1,3}$/.test(urlObj.hostname),
             isSuspiciousTld: suspiciousTlds.some(tld => urlObj.hostname.endsWith(tld)),
             hasManySubdomains: (urlObj.hostname.match(/\./g) || []).length > 2,
             hasSuspiciousKeywords: suspiciousKeywords.some(kw => url.toLowerCase().includes(kw)),
+            similarToBrand,
         };
     } catch {
         return {};
@@ -363,6 +416,7 @@ function calculateOverallRiskScore(results) {
     if (virustotal?.suspiciousCount > 0) score += (20 + Math.min(15, virustotal.suspiciousCount * 2));
     if (urlAnalysis?.hasSuspiciousKeywords) score += 15;
     if (urlAnalysis?.isSuspiciousTld) score += 15;
+    if (urlAnalysis?.similarToBrand) score += 25;
     if (whoisResult && whoisResult.domainAgeScore < 40) score += 15;
     else if (whoisResult && whoisResult.domainAgeScore < 80) score += 5;
 
@@ -371,86 +425,281 @@ function calculateOverallRiskScore(results) {
     return Math.min(100, Math.max(0, Math.round(score)));
 }
 
-
 // --- UI Update Functions ---
-
-/** Master function to update the entire UI based on scan results. */
 async function updateUI(saveHistory = true) {
     if (!state.scanResults) return resetUI();
     const { riskScore, timestamp, scanTime } = state.scanResults;
     const riskLevel = riskScore > 70 ? 'danger' : riskScore > 40 ? 'warning' : 'safe';
-    const riskText = riskLevel === 'danger' ? 'High Risk' : riskLevel === 'warning' ? 'Potential Risk' : 'Likely Safe';
     const scoreColor = `var(--${riskLevel}-color)`;
 
-    elements.summaryTitle.textContent = riskText;
-    elements.summaryTitle.className = `summary-title ${riskLevel}`;
-    elements.summaryText.textContent = generateSummaryText(state.scanResults);
+    // Trust score circle
     window.updateProgressCircle(elements.overallScoreProgress, riskScore, scoreColor);
     elements.overallScoreText.innerHTML = `${riskScore}<span>%</span>`;
+
+    // Risk indicator bar
     if (elements.riskIndicatorBar) elements.riskIndicatorBar.style.setProperty('--position', `${riskScore}`);
 
-    updateAllMetrics();
+    // Risk pill
+    updateRiskPill(riskLevel, riskScore);
+
+    // Status badge
+    updateStatusBadge(riskLevel);
+
+    // Quick stats
+    updateQuickStats();
+
+    // Donut chart
+    updateDonutChart();
+
+    // Details, report, AI, alerts
     updateDetailsContent();
     updateReportContent();
     updateIntentContent();
+    updateAlertsSection();
 
+    // Show/hide actions bar
+    if (elements.actionsBar) elements.actionsBar.style.display = 'flex';
+
+    // Timestamps
     elements.lastScan.textContent = formatDate(timestamp, true);
     elements.scanTime.textContent = `${(scanTime || 0).toFixed(1)}s`;
-    elements.mainContent.style.display = 'block';
+    elements.mainContent.style.display = 'flex';
 
-    if (saveHistory) {
-      await addToHistory(state.scanResults);
+    // Phishing warning overlay
+    if (riskScore >= CONFIG.PHISHING_THRESHOLD) {
+        showPhishingOverlay(riskScore, state.currentUrl);
     }
+
+    if (saveHistory) await addToHistory(state.scanResults);
     chrome.storage.local.set({ lastScan: state.scanResults }).catch(console.error);
 }
 
-function updateAllMetrics() {
-    const { sslResult, urlAnalysis, safeBrowsing, virustotal } = state.scanResults;
+function updateRiskPill(riskLevel, riskScore) {
+    if (!elements.riskPill) return;
+    const labels = { safe: 'Low Risk', warning: 'Medium Risk', danger: 'High Risk' };
+    elements.riskPill.textContent = labels[riskLevel] || 'Unknown';
+    elements.riskPill.className = `risk-pill ${riskLevel}`;
+}
 
-    let httpsScore = sslResult?.isValid ? 100 : sslResult?.isValid === false ? 0 : 25;
-    window.updateProgressCircle(elements.httpsProgress, httpsScore, httpsScore === 100 ? 'var(--safe-color)' : httpsScore === 0 ? 'var(--danger-color)' : 'var(--warning-color)');
-    elements.httpsScore.innerHTML = httpsScore === 100 ? '<i class="fas fa-check"></i>' : '<i class="fas fa-times"></i>';
-    elements.httpsText.textContent = httpsScore === 100 ? 'Secure' : 'Insecure';
+function updateStatusBadge(riskLevel) {
+    if (!elements.statusBadge) return;
+    const labels = { safe: 'Safe', warning: 'Suspicious', danger: 'Dangerous', ready: 'Ready' };
+    elements.statusBadge.className = `status-badge ${riskLevel}`;
+    if (elements.statusBadgeText) elements.statusBadgeText.textContent = labels[riskLevel] || 'Ready';
+}
 
-    let structureScore = urlAnalysis ? 100 - Object.values(urlAnalysis).filter(v => v === true).length * 25 : 50;
-    structureScore = Math.max(0, structureScore);
-    window.updateProgressCircle(elements.structureProgress, structureScore, structureScore > 75 ? 'var(--safe-color)' : structureScore > 40 ? 'var(--warning-color)' : 'var(--danger-color)');
-    elements.structureScore.innerHTML = `${structureScore}<span>%</span>`;
+function updateQuickStats() {
+    const { sslResult, virustotal, safeBrowsing, whoisResult } = state.scanResults;
 
-    let repScore = 100 - (safeBrowsing?.isSafe === false ? 60 : 0) - (virustotal?.maliciousCount * 10) - (virustotal?.suspiciousCount * 5);
-    repScore = Math.max(0, repScore);
-    window.updateProgressCircle(elements.reputationProgress, repScore, repScore > 80 ? 'var(--safe-color)' : repScore > 40 ? 'var(--warning-color)' : 'var(--danger-color)');
-    elements.reputationScore.innerHTML = `${repScore}<span>%</span>`;
+    // HTTPS
+    const httpsVal = elements.statHttpsVal;
+    if (httpsVal) {
+        httpsVal.textContent = sslResult?.isValid ? 'Secure' : 'Insecure';
+        httpsVal.className = `stat-value ${sslResult?.isValid ? 'safe' : 'danger'}`;
+    }
+
+    // Domain Age
+    const ageVal = elements.statDomainAgeVal;
+    if (ageVal) {
+        ageVal.textContent = whoisResult?.domainAgeString || '—';
+        const ageScore = whoisResult?.domainAgeScore || 0;
+        ageVal.className = `stat-value ${ageScore > 60 ? 'safe' : ageScore > 20 ? 'warning' : 'danger'}`;
+    }
+
+    // Blacklist (Google Safe Browsing)
+    const blVal = elements.statBlacklistVal;
+    if (blVal) {
+        blVal.textContent = safeBrowsing?.isSafe ? 'Clean' : 'Flagged';
+        blVal.className = `stat-value ${safeBrowsing?.isSafe ? 'safe' : 'danger'}`;
+    }
+
+    // VirusTotal
+    const vtVal = elements.statVtVal;
+    if (vtVal) {
+        const mal = virustotal?.maliciousCount || 0;
+        const sus = virustotal?.suspiciousCount || 0;
+        vtVal.textContent = virustotal?.error ? 'N/A' : `${mal} / ${sus}`;
+        vtVal.className = `stat-value ${mal > 0 ? 'danger' : sus > 0 ? 'warning' : 'safe'}`;
+    }
+}
+
+/**
+ * Draws the risk breakdown donut chart on canvas.
+ */
+function updateDonutChart() {
+    const canvas = elements.riskChart;
+    if (!canvas) return;
+
+    const { safeBrowsing, virustotal, whoisResult, sslResult, urlAnalysis, riskScore } = state.scanResults;
+
+    // Calculate segment scores
+    // Domain risk: domain age + TLD + IP + brand impersonation
+    let domainRisk = 0;
+    if (urlAnalysis?.isIpAddress) domainRisk += 40;
+    if (urlAnalysis?.isSuspiciousTld) domainRisk += 15;
+    if (urlAnalysis?.similarToBrand) domainRisk += 25;
+    if (whoisResult?.domainAgeScore < 40) domainRisk += 20;
+    domainRisk = Math.min(100, domainRisk);
+
+    // Content risk: URL keywords + SSL
+    let contentRisk = 0;
+    if (urlAnalysis?.hasSuspiciousKeywords) contentRisk += 30;
+    if (sslResult?.isValid === false) contentRisk += 30;
+    if (urlAnalysis?.hasManySubdomains) contentRisk += 15;
+    contentRisk = Math.min(100, contentRisk);
+
+    // Blacklist risk: GSB + VT
+    let blacklistRisk = 0;
+    if (safeBrowsing?.isSafe === false) blacklistRisk += 60;
+    if ((virustotal?.maliciousCount || 0) > 0) blacklistRisk += 40;
+    blacklistRisk = Math.min(100, blacklistRisk);
+
+    const total = domainRisk + contentRisk + blacklistRisk || 1;
+
+    // Update legend values
+    if (elements.legDomain) elements.legDomain.textContent = `${Math.round(domainRisk)}%`;
+    if (elements.legContent) elements.legContent.textContent = `${Math.round(contentRisk)}%`;
+    if (elements.legBlacklist) elements.legBlacklist.textContent = `${Math.round(blacklistRisk)}%`;
+    if (elements.donutScore) elements.donutScore.textContent = `${riskScore}%`;
+
+    // Draw canvas
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    const cx = W / 2, cy = H / 2;
+    const radius = Math.min(cx, cy) - 6;
+    const innerRadius = radius * 0.62;
+    ctx.clearRect(0, 0, W, H);
+
+    // Build segments
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const segments = [
+        { value: domainRisk, color: isDark ? '#ef4444' : '#dc2626' },      // domain - red
+        { value: contentRisk, color: isDark ? '#f59e0b' : '#d97706' },     // content - amber
+        { value: blacklistRisk, color: isDark ? '#818cf8' : '#4f46e5' },   // blacklist - indigo
+    ];
+
+    // If all zero, show grey safe ring
+    const allZero = segments.every(s => s.value === 0);
+    if (allZero) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.arc(cx, cy, innerRadius, 0, Math.PI * 2, true);
+        ctx.fillStyle = isDark ? '#22c55e' : '#16a34a';
+        ctx.fill();
+        if (elements.donutScore) elements.donutScore.textContent = `${riskScore}%`;
+        return;
+    }
+
+    let startAngle = -Math.PI / 2;
+    segments.forEach((seg, i) => {
+        const slice = (seg.value / total) * Math.PI * 2;
+        if (slice <= 0) return;
+
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(startAngle) * radius, cy + Math.sin(startAngle) * radius);
+        ctx.arc(cx, cy, radius, startAngle, startAngle + slice);
+        ctx.arc(cx, cy, innerRadius, startAngle + slice, startAngle, true);
+        ctx.closePath();
+        ctx.fillStyle = seg.color;
+        ctx.fill();
+
+        // Gap between segments
+        startAngle += slice + 0.025;
+    });
+}
+
+/** Shared HTML escape helper */
+function escapeHtmlStr(str) {
+    return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function updateDetailsContent() {
     if (!elements.detailsContent || !state.scanResults) return;
-    const { safeBrowsing, virustotal, sslResult, whoisResult } = state.scanResults;
+    const { safeBrowsing, virustotal, sslResult, whoisResult, urlAnalysis } = state.scanResults;
     const createCheckItem = (label, status, icon, text, details = '') =>
-        `<div class="check-item ${status}"><div class="check-icon"><i class="fas ${icon}"></i></div><div class="check-text"><strong>${label}:</strong> ${text}${details ? ` <em>(${details})</em>` : ''}</div></div>`;
+        `<div class="check-item ${status}"><div class="check-icon"><i class="fas ${icon}"></i></div><div class="check-text"><strong>${escapeHtmlStr(label)}:</strong> ${escapeHtmlStr(text)}${details ? ` <em>${escapeHtmlStr(details)}</em>` : ''}</div></div>`;
 
     let html = '';
     html += createCheckItem('SSL Certificate', sslResult?.isValid ? 'passed' : 'failed', sslResult?.isValid ? 'fa-lock' : 'fa-lock-open', sslResult?.isValid ? 'Secure (HTTPS)' : 'Insecure or Invalid');
-    html += createCheckItem('Google Safe Browsing', safeBrowsing?.isSafe ? 'passed' : 'failed', safeBrowsing?.isSafe ? 'fa-check-circle' : 'fa-exclamation-triangle', safeBrowsing?.isSafe ? 'No threats found' : `Threats detected!`, safeBrowsing.threats?.join(', '));
+    html += createCheckItem('Google Safe Browsing', safeBrowsing?.isSafe !== false ? 'passed' : 'failed', safeBrowsing?.isSafe !== false ? 'fa-check-circle' : 'fa-exclamation-triangle', safeBrowsing?.isSafe !== false ? 'No threats found' : 'Threats detected!', safeBrowsing?.threats?.join(', '));
     html += createCheckItem('VirusTotal', virustotal?.isSafe ? 'passed' : (virustotal?.maliciousCount > 0 ? 'failed' : 'warning'), 'fa-shield-virus', `${virustotal?.maliciousCount || 0} Malicious, ${virustotal?.suspiciousCount || 0} Suspicious`);
     html += createCheckItem('Domain Age', whoisResult?.domainAgeScore > 60 ? 'passed' : (whoisResult?.domainAgeScore > 20 ? 'warning' : 'failed'), 'fa-calendar-alt', `${whoisResult?.domainAgeString || 'Unknown'}`, `Registered: ${whoisResult?.formatted_create_date || 'N/A'}`);
+    if (urlAnalysis?.similarToBrand) {
+        html += createCheckItem('Brand Impersonation', 'failed', 'fa-user-secret', `Similar to "${urlAnalysis.similarToBrand}"`, 'Possible typosquatting');
+    }
+    if (whoisResult?.registrar_name && whoisResult.registrar_name !== 'N/A') {
+        html += createCheckItem('Registrar', 'info', 'fa-building', whoisResult.registrar_name);
+    }
     elements.detailsContent.innerHTML = html;
+}
+
+function updateAlertsSection() {
+    if (!elements.alertsCard || !elements.alertsContent) return;
+    const { safeBrowsing, virustotal, sslResult, urlAnalysis, whoisResult } = state.scanResults;
+
+    const alerts = [];
+
+    if (safeBrowsing?.isSafe === false && safeBrowsing.threats?.length) {
+        safeBrowsing.threats.forEach(t => alerts.push({ type: 'danger', icon: 'fa-triangle-exclamation', title: 'Google Safe Browsing Threat', detail: t }));
+    }
+    if ((virustotal?.maliciousCount || 0) > 0) {
+        alerts.push({ type: 'danger', icon: 'fa-bug', title: 'VirusTotal: Malicious Detections', detail: `${virustotal.maliciousCount} engine(s) flagged this URL` });
+    }
+    if ((virustotal?.suspiciousCount || 0) > 0) {
+        alerts.push({ type: 'warning', icon: 'fa-circle-exclamation', title: 'VirusTotal: Suspicious', detail: `${virustotal.suspiciousCount} engine(s) flagged as suspicious` });
+    }
+    if (sslResult?.isValid === false) {
+        alerts.push({ type: 'warning', icon: 'fa-lock-open', title: 'No HTTPS / SSL', detail: 'Connection is not encrypted — risk of data interception' });
+    }
+    if (urlAnalysis?.isIpAddress) {
+        alerts.push({ type: 'danger', icon: 'fa-server', title: 'IP Address Used as Domain', detail: 'Legitimate sites rarely use bare IP addresses' });
+    }
+    if (urlAnalysis?.similarToBrand) {
+        alerts.push({ type: 'danger', icon: 'fa-user-secret', title: `Brand Impersonation: "${urlAnalysis.similarToBrand}"`, detail: 'Domain may be intentionally mimicking a trusted brand' });
+    }
+    if (urlAnalysis?.isSuspiciousTld) {
+        alerts.push({ type: 'warning', icon: 'fa-globe', title: 'Suspicious Top-Level Domain', detail: 'TLDs like .xyz, .top, .tk are commonly used in phishing' });
+    }
+    if (urlAnalysis?.hasSuspiciousKeywords) {
+        alerts.push({ type: 'warning', icon: 'fa-key', title: 'Suspicious Keywords in URL', detail: 'Phishing URLs often include "login", "verify", "secure", etc.' });
+    }
+    if (whoisResult && !whoisResult.error && whoisResult.domainAgeScore < 20) {
+        alerts.push({ type: 'warning', icon: 'fa-calendar', title: 'Very New Domain', detail: `Domain registered ${whoisResult.domainAgeString} ago — high-risk indicator` });
+    }
+
+    if (alerts.length === 0) {
+        elements.alertsCard.style.display = 'none';
+        return;
+    }
+
+    elements.alertsCard.style.display = 'block';
+    elements.alertsContent.innerHTML = alerts.map(a => `
+        <div class="alert-item ${a.type}">
+            <div class="alert-icon"><i class="fas ${a.icon}"></i></div>
+            <div class="alert-text">
+                <strong>${escapeHtmlStr(a.title)}</strong>
+                <span>${escapeHtmlStr(a.detail)}</span>
+            </div>
+        </div>
+    `).join('');
 }
 
 function updateReportContent() {
     if (!elements.reportContent || !state.scanResults) return;
     const { url, riskScore, safeBrowsing, virustotal, whoisResult, urlAnalysis } = state.scanResults;
-    const escapeHtml = (unsafe) => String(unsafe).replace(/</g, "<").replace(/>/g, ">");
-    const addLine = (label, value) => value !== undefined && value !== null && value !== 'N/A' ? `<div><strong>${label}:</strong> ${escapeHtml(value)}</div>` : '';
+    const escapeHtml = (unsafe) => String(unsafe).replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const addLine = (label, value) => value !== undefined && value !== null && value !== 'N/A' ? `<div><strong>${label}:</strong> ${escapeHtml(String(value))}</div>` : '';
 
-    let html = `<div class="report-item"><strong>URL:</strong> <span style="word-break: break-all;">${escapeHtml(url)}</span></div>`;
+    let html = `<div class="report-item"><strong>URL:</strong> <span style="word-break:break-all;">${escapeHtml(url)}</span></div>`;
     html += `<div class="report-item"><strong>Risk Score:</strong> ${riskScore}%</div>`;
-    html += `<div class="report-item"><strong>Google Safe Browsing:</strong> ${safeBrowsing?.isSafe ? 'Clean' : `Threats: ${escapeHtml(safeBrowsing.threats?.join(', '))}`} ${safeBrowsing.error ? `<span class="error-text">(${escapeHtml(safeBrowsing.error)})</span>` : ''}</div>`;
-    html += `<div class="report-item"><strong>VirusTotal:</strong> ${virustotal?.maliciousCount || 0} Malicious, ${virustotal?.suspiciousCount || 0} Suspicious ${virustotal.error ? `<span class="error-text">(${escapeHtml(virustotal.error)})</span>` : ''}</div>`;
+    html += `<div class="report-item"><strong>Google Safe Browsing:</strong> ${safeBrowsing?.isSafe ? 'Clean' : `Threats: ${escapeHtml(safeBrowsing?.threats?.join(', '))}`} ${safeBrowsing?.error ? `<span class="error-text">(${escapeHtml(safeBrowsing.error)})</span>` : ''}</div>`;
+    html += `<div class="report-item"><strong>VirusTotal:</strong> ${virustotal?.maliciousCount || 0} Malicious, ${virustotal?.suspiciousCount || 0} Suspicious ${virustotal?.error ? `<span class="error-text">(${escapeHtml(virustotal.error)})</span>` : ''}</div>`;
     html += `<div class="report-item"><strong>URL Structure Analysis</strong>
-        ${addLine('Uses IP Address', urlAnalysis.isIpAddress ? 'Yes' : 'No')}
-        ${addLine('Suspicious TLD', urlAnalysis.isSuspiciousTld ? 'Yes' : 'No')}
-        ${addLine('Suspicious Keywords', urlAnalysis.hasSuspiciousKeywords ? 'Yes' : 'No')}
+        ${addLine('Uses IP Address', urlAnalysis?.isIpAddress ? 'Yes' : 'No')}
+        ${addLine('Suspicious TLD', urlAnalysis?.isSuspiciousTld ? 'Yes' : 'No')}
+        ${addLine('Suspicious Keywords', urlAnalysis?.hasSuspiciousKeywords ? 'Yes' : 'No')}
+        ${addLine('Brand Impersonation', urlAnalysis?.similarToBrand || 'None detected')}
     </div>`;
     html += `<div class="report-item"><strong>Domain Info (WHOIS)</strong>
         ${addLine('Registered', whoisResult?.formatted_create_date)}
@@ -461,112 +710,126 @@ function updateReportContent() {
     elements.reportContent.innerHTML = html;
 }
 
-// NEW: Function to parse AI response into styled HTML
+/**
+ * Parse the structured AI response into styled HTML.
+ * Expected format: headings like "Impersonation Risk:", "Top Signals:", "Risk Score:", "Verdict:", "Confidence:"
+ */
 function formatAIResponse(text) {
-    if (!text) return '<p>No analysis available.</p>';
+    if (!text) return '<p class="placeholder-text">No analysis available.</p>';
 
-    // Sanitize the whole text first to prevent any HTML injection from the AI
-    let sanitizedText = text.replace(/</g, "<").replace(/>/g, ">");
+    const safe = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const lines = safe.split('\n').filter(l => l.trim());
+    let html = '';
 
-    // General keywords and patterns to highlight
-    const highlightPatterns = [
-        /(\d+ malicious)/ig,
-        /(\d+ suspicious)/ig,
-        /(high risk|moderate risk|potential risk|major red flags)/ig,
-        /(proceed with caution|avoid clicking|not recommended)/ig,
-        /(phishing attempt|deceive users|impersonate)/ig,
-        /(suspicious tld|suspicious domain)/ig,
-        /(very new|recently registered|lack of history)/ig,
-        /(\.\w{3,})/g, // Highlight TLDs like .buzz, .info, but not .co, .io
-        /(Error)/ig
-    ];
+    // Highlight keywords
+    const highlight = (str) => str
+        .replace(/(high risk|phishing|dangerous|malicious|suspicious|flagged|typosquat|impersonat)/gi, '<span class="highlight">$1</span>')
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
 
-    let html = sanitizedText;
-    for (const pattern of highlightPatterns) {
-        html = html.replace(pattern, '<span class="highlight">$1</span>');
-    }
+    // Normalize a line to check if it starts a known section
+    const normalizeKey = (line) => line
+        .replace(/\*\*/g, '')
+        .replace(/^#+\s*/, '')
+        .replace(/[:\-*•]+$/, '')
+        .toLowerCase().trim();
 
-    // Build the final HTML line by line for structure (headings, lists)
-    const lines = html.split('\n').filter(line => line.trim() !== '');
-    let finalHtml = '';
-    let inList = false;
+    const headings = {
+        'impersonation risk': null,
+        'top signals': null,
+        'risk score': null,
+        'verdict': null,
+        'confidence': null,
+    };
+
+    let currentSection = null;
+    let sectionData = {};
 
     for (const line of lines) {
-        // Check for headings like **Impersonation Risk:**
-        if (line.startsWith('**') && line.includes(':**')) {
-            if (inList) {
-                finalHtml += '</ul>'; // Close previous list if a new heading starts
-                inList = false;
-            }
-            finalHtml += line.replace(/\*\*(.*?):\*\*/, '<h3>$1:</h3>');
-            // If the heading is for the list, start a new <ul>
-            if (line.toLowerCase().includes('key red flags')) {
-                finalHtml += '<ul>';
-                inList = true;
-            }
-        }
-        // Check for numbered list items like "1. ..."
-        else if (inList && line.match(/^\s*\d+\.\s*/)) {
-            finalHtml += `<li>${line.replace(/^\s*\d+\.\s*/, '')}</li>`;
-        }
-        // Otherwise, it's a regular paragraph
-        else {
-             if (inList) { // A paragraph after a list means the list has ended
-                finalHtml += '</ul>';
-                inList = false;
-             }
-            finalHtml += `<p>${line}</p>`;
+        const normed = normalizeKey(line);
+        const matchedKey = Object.keys(headings).find(k => normed === k || normed.startsWith(k));
+
+        if (matchedKey) {
+            currentSection = matchedKey;
+            sectionData[matchedKey] = [];
+        } else if (currentSection) {
+            const clean = line.replace(/^[-•*\d]+\.?\s*/, '').trim();
+            if (clean) sectionData[currentSection].push(clean);
         }
     }
 
-    if (inList) {
-        finalHtml += '</ul>'; // Ensure any open list is closed at the end
+    // Render each section
+    if (sectionData['impersonation risk']?.length) {
+        const risk = sectionData['impersonation risk'][0];
+        const riskLevel = /high/i.test(risk) ? 'danger' : /medium/i.test(risk) ? 'warning' : 'safe';
+        html += `<h3>🎭 Impersonation Risk</h3>`;
+        html += `<div class="alert-item ${riskLevel}" style="margin-bottom:8px;"><div class="alert-icon"><i class="fas fa-user-secret"></i></div><div class="alert-text"><span>${highlight(risk)}</span></div></div>`;
     }
 
-    return finalHtml;
+    if (sectionData['top signals']?.length) {
+        html += `<h3>🔍 Top Signals</h3><ul>`;
+        sectionData['top signals'].slice(0, 3).forEach(s => {
+            html += `<li>${highlight(s)}</li>`;
+        });
+        html += `</ul>`;
+    }
+
+    if (sectionData['verdict']?.length) {
+        const v = sectionData['verdict'][0].toUpperCase();
+        const cls = v.includes('PHISHING') ? 'phishing' : v.includes('SUSPICIOUS') ? 'suspicious' : 'safe';
+        const icon = cls === 'phishing' ? 'fa-skull' : cls === 'suspicious' ? 'fa-triangle-exclamation' : 'fa-circle-check';
+        html += `<h3>⚖️ Verdict</h3>`;
+        html += `<span class="verdict-badge ${cls}"><i class="fas ${icon}"></i>${sectionData['verdict'][0]}</span>`;
+        if (sectionData['verdict'].length > 1) {
+            html += `<p style="font-size:11.5px;color:var(--text-secondary);margin-top:4px;">${highlight(sectionData['verdict'].slice(1).join(' '))}</p>`;
+        }
+    }
+
+    if (sectionData['risk score']?.length) {
+        html += `<h3>📊 AI Risk Score</h3>`;
+        html += `<p style="font-size:13px;font-weight:700;color:var(--text-primary);">${sectionData['risk score'][0]}</p>`;
+    }
+
+    if (sectionData['confidence']?.length) {
+        html += `<span class="confidence-tag">Confidence: ${sectionData['confidence'][0]}</span>`;
+    }
+
+    return html || `<pre style="font-size:11.5px;white-space:pre-wrap;color:var(--text-secondary);">${safe}</pre>`;
 }
 
-// UPDATED: This function now uses the new formatter
 function updateIntentContent() {
     if (!elements.intentContent || !state.scanResults?.intentAnalysis) return;
     const { text, error } = state.scanResults.intentAnalysis;
     if (error) {
-        elements.intentContent.innerHTML = `<p class="api-key-notice">${error}</p>`;
+        elements.intentContent.innerHTML = `<p class="api-key-notice"><i class="fas fa-key"></i> ${error}</p>`;
     } else {
-        // Use the new formatter to convert the AI's text to styled HTML
         elements.intentContent.innerHTML = formatAIResponse(text);
     }
 }
 
+// --- Phishing Warning Overlay ---
+function showPhishingOverlay(score, url) {
+    if (!elements.phishingWarningOverlay) return;
+    if (elements.overlayDomainText) elements.overlayDomainText.textContent = extractDomainFromUrl(url) || url;
+    if (elements.overlayRiskScore) elements.overlayRiskScore.textContent = `${score}%`;
+    elements.phishingWarningOverlay.style.display = 'block';
+}
+
+function hidePhishingOverlay() {
+    if (elements.phishingWarningOverlay) elements.phishingWarningOverlay.style.display = 'none';
+}
 
 // --- UI & State Management ---
-
 function resetUI() {
     if (elements.mainContent) elements.mainContent.style.display = 'none';
+    if (elements.actionsBar) elements.actionsBar.style.display = 'none';
     showLoading(false);
-    elements.summaryTitle.textContent = 'Website Safety';
-    elements.summaryTitle.className = 'summary-title';
-    elements.summaryText.textContent = "Enter a URL or use 'Current Tab' to start.";
     window.updateProgressCircle(elements.overallScoreProgress, 0, 'var(--neutral-color)');
-    elements.overallScoreText.innerHTML = `?<span>%</span>`;
+    if (elements.overallScoreText) elements.overallScoreText.innerHTML = `?<span>%</span>`;
     if (elements.riskIndicatorBar) elements.riskIndicatorBar.style.setProperty('--position', '0');
-
-    updateMetric('https', 0, '?');
-    updateMetric('structure', 0, '?<span>%</span>');
-    updateMetric('reputation', 0, '?<span>%</span>');
-    if (window.phishGuardWhois) {
-      window.phishGuardWhois.resetUI();
-    }
-
-    [elements.detailsContent, elements.reportContent, elements.intentContent].forEach((el, i) => {
-        const btn = [elements.toggleDetails, elements.toggleReport, elements.toggleIntent][i];
-        if (el && btn) {
-            const isExpanded = i === 0;
-            el.setAttribute('aria-hidden', !isExpanded);
-            btn.setAttribute('aria-expanded', isExpanded);
-        }
-    });
-
+    if (elements.riskPill) { elements.riskPill.textContent = 'Unknown'; elements.riskPill.className = 'risk-pill'; }
+    updateStatusBadge('ready');
+    if (elements.alertsCard) elements.alertsCard.style.display = 'none';
+    if (window.phishGuardWhois) window.phishGuardWhois.resetUI();
     elements.lastScan.textContent = 'Never';
     elements.scanTime.textContent = '0s';
     clearError();
@@ -574,6 +837,7 @@ function resetUI() {
 
 function resetUIForScan() {
     elements.mainContent.style.display = 'none';
+    if (elements.actionsBar) elements.actionsBar.style.display = 'none';
     clearError();
 }
 
@@ -584,26 +848,19 @@ function toggleSection(contentElement, buttonElement) {
     contentElement.setAttribute('aria-hidden', isExpanded);
 }
 
-function generateSummaryText(results) {
-    const { riskScore, whoisResult, virustotal } = results;
-    if (riskScore > 70) return `This site has major red flags. The domain is ${whoisResult?.domainAgeString || 'very new'}, and ${virustotal?.maliciousCount || 'several'} engines flagged it as malicious.`;
-    if (riskScore > 40) return `Caution is advised. While not definitively malicious, this site has some suspicious properties like its age or URL structure.`;
-    return 'Analysis complete. This website appears to be safe, with no major threats detected from our scans.';
-}
-
-function showLoading(show, message = 'Analyzing...') {
+function showLoading(show, message = 'Analyzing…') {
     if (!elements.loading) return;
     elements.loading.style.display = show ? 'flex' : 'none';
-    if (show) elements.loadingMessage.textContent = message;
-    elements.checkBtn.disabled = show;
-    elements.currentTabBtn.disabled = show;
+    if (show && elements.loadingMessage) elements.loadingMessage.textContent = message;
+    if (elements.checkBtn) elements.checkBtn.disabled = show;
+    if (elements.currentTabBtn) elements.currentTabBtn.disabled = show;
 }
 
 function updateProgress(step, message) {
-    if (elements.loading.style.display === 'none') return;
+    if (elements.loading?.style.display === 'none') return;
     const percentage = Math.min(100, (step / CONFIG.SCAN_STEPS) * 100);
-    elements.progressFill.style.width = `${percentage}%`;
-    elements.loadingMessage.textContent = message;
+    if (elements.progressFill) elements.progressFill.style.width = `${percentage}%`;
+    if (elements.loadingMessage) elements.loadingMessage.textContent = message;
 }
 
 function showError(message) {
@@ -616,33 +873,25 @@ function showError(message) {
 
 function clearError() {
     clearTimeout(state.errorTimeoutId);
-    if(elements.errorDisplay) elements.errorDisplay.style.display = 'none';
+    if (elements.errorDisplay) elements.errorDisplay.style.display = 'none';
 }
 
-function updateMetric(prefix, score, text) {
-    const progressEl = elements[`${prefix}Progress`];
-    const scoreEl = elements[`${prefix}Score`];
-    if(progressEl) window.updateProgressCircle(progressEl, score || 0, 'var(--neutral-color)');
-    if(scoreEl) scoreEl.innerHTML = text;
-}
-
-
-// --- Theme, History, and Cache ---
-
+// --- Theme ---
 async function toggleTheme() {
     const theme = elements.themeSwitch.checked ? 'dark' : 'light';
     document.documentElement.setAttribute('data-theme', theme);
     await chrome.storage.local.set({ theme });
+    // Redraw chart in new theme colors
+    if (state.scanResults) updateDonutChart();
 }
 
 async function loadSettings() {
     const { theme = 'light' } = await chrome.storage.local.get('theme');
-    if (elements.themeSwitch) {
-        elements.themeSwitch.checked = (theme === 'dark');
-    }
+    if (elements.themeSwitch) elements.themeSwitch.checked = (theme === 'dark');
     document.documentElement.setAttribute('data-theme', theme);
 }
 
+// --- History ---
 async function loadHistory() {
     const { history = [] } = await chrome.storage.local.get('history');
     state.history = history;
@@ -650,13 +899,9 @@ async function loadHistory() {
 
 async function addToHistory(result) {
     const existingIndex = state.history.findIndex(item => item.url === result.url);
-    if (existingIndex > -1) {
-      state.history.splice(existingIndex, 1);
-    }
+    if (existingIndex > -1) state.history.splice(existingIndex, 1);
     state.history.unshift(result);
-    if (state.history.length > CONFIG.MAX_HISTORY_ITEMS) {
-        state.history.length = CONFIG.MAX_HISTORY_ITEMS;
-    }
+    if (state.history.length > CONFIG.MAX_HISTORY_ITEMS) state.history.length = CONFIG.MAX_HISTORY_ITEMS;
     await chrome.storage.local.set({ history: state.history });
 }
 
@@ -670,9 +915,9 @@ function showHistoryModal() {
     content.innerHTML = `
         <h2>Scan History</h2>
         <div class="phishguard-history-list">
-            ${state.history.length === 0 ? '<p style="text-align: center; color: var(--text-light);">No history yet.</p>' : ''}
+            ${state.history.length === 0 ? '<p style="text-align:center;color:var(--text-muted);font-size:12px;padding:12px 0;">No history yet.</p>' : ''}
         </div>
-        <button class="action-btn close-btn">Close</button>
+        <button class="close-btn">Close</button>
     `;
 
     const list = content.querySelector('.phishguard-history-list');
@@ -695,17 +940,15 @@ function showHistoryModal() {
 
     const close = () => document.body.removeChild(overlay);
     content.querySelector('.close-btn').addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if(e.target === overlay) close(); });
-
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
     document.body.appendChild(overlay);
 }
 
+// --- Cache ---
 async function getFromCache(url) {
     const { scanCache = {} } = await chrome.storage.local.get('scanCache');
     const cachedItem = scanCache[url];
-    if (cachedItem && (Date.now() - cachedItem.timestamp < CONFIG.CACHE_DURATION)) {
-        return cachedItem;
-    }
+    if (cachedItem && (Date.now() - cachedItem.timestamp < CONFIG.CACHE_DURATION)) return cachedItem;
     return null;
 }
 
@@ -720,18 +963,14 @@ async function loadLastScan() {
     if (lastScan?.url && lastScan.riskScore !== undefined) {
         state.scanResults = lastScan;
         elements.urlInput.value = lastScan.url;
-        if (window.phishGuardWhois) {
-            window.phishGuardWhois.updateDomainAgeMetricUI(lastScan.whoisResult);
-        }
+        if (window.phishGuardWhois) window.phishGuardWhois.updateDomainAgeMetricUI(lastScan.whoisResult);
         updateUI(false);
     } else {
         resetUI();
     }
 }
 
-
 // --- Utility Functions ---
-
 function isValidUrl(url) {
     if (!url?.trim()) return { valid: false, message: 'URL is empty.' };
     let finalUrl = url.trim();

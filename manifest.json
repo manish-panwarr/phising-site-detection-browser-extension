@@ -34,9 +34,10 @@
     "https://safebrowsing.googleapis.com/",
     "https://www.virustotal.com/",
     "https://api.whoxy.com/",
-    "https://api.openai.com/"
+    "https://api.openai.com/",
+    "https://openrouter.ai/"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; style-src 'self' https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com;"
+    "extension_pages": "script-src 'self'; object-src 'self'; style-src 'self' https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src 'self' https://cdnjs.cloudflare.com https://fonts.gstatic.com;"
   }
 }
